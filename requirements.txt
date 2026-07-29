@@ -1,0 +1,8 @@
+fer==25.10.3
+mediapipe==0.10.35
+tensorflow==2.21.0
+opencv-contrib-python==5.0.0.93
+numpy==2.5.1
+pandas==3.0.3
+matplotlib==3.11.0
+scikit-learn==1.9.0
