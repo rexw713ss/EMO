@@ -12,18 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import sqlite3
 import threading
 import time
+import uuid
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from emotion_system import Stage3_FineTuned
 
@@ -34,21 +38,215 @@ CLASS_NAMES_PATH = Path(os.getenv("EMOTION_CLASS_NAMES_PATH", BASE_DIR / "class_
 MAX_FRAME_BYTES = int(os.getenv("EMOTION_MAX_FRAME_BYTES", "2500000"))
 MAX_FRAME_DIMENSION = int(os.getenv("EMOTION_MAX_FRAME_DIMENSION", "1280"))
 DEFAULT_TTA = os.getenv("EMOTION_TTA", "false").lower() in {"1", "true", "yes", "on"}
+TF_INTRA_OP_THREADS = int(os.getenv("EMOTION_TF_INTRA_OP_THREADS", "4"))
+TF_INTER_OP_THREADS = int(os.getenv("EMOTION_TF_INTER_OP_THREADS", "1"))
+DATABASE_PATH = Path(
+    os.getenv("EMOTION_DATABASE_PATH", BASE_DIR / "data" / "emotion_sessions.db")
+)
+
+MODEL_EMOTION_CLASSES = (
+    "anger",
+    "contempt",
+    "disgust",
+    "fear",
+    "happy",
+    "neutral",
+    "sad",
+    "surprise",
+)
 
 VISUAL_STATE_GROUPS = {
     "calm": ("neutral",),
     "pleasant": ("happy",),
-    "alert": ("anger", "angry", "fear", "surprise"),
+    "alert": ("anger", "fear", "surprise"),
     "low": ("sad", "contempt", "disgust"),
 }
 
 VISUAL_STATE_LABELS = {
     "calm": "平靜",
     "pleasant": "愉悅",
-    "alert": "高喚起／警覺",
-    "low": "負向／低落",
+    "alert": "緊張",
+    "low": "低落",
     "unknown": "未偵測",
 }
+
+_mapped_model_classes = [
+    emotion
+    for grouped_emotions in VISUAL_STATE_GROUPS.values()
+    for emotion in grouped_emotions
+]
+if (
+    len(_mapped_model_classes) != len(set(_mapped_model_classes))
+    or set(_mapped_model_classes) != set(MODEL_EMOTION_CLASSES)
+):
+    raise RuntimeError("八類模型情緒必須各自且僅能映射到一個四類視覺狀態")
+
+
+class EmotionSessionCreate(BaseModel):
+    participant_code: str = Field(min_length=1, max_length=64)
+    display_name: str | None = Field(default=None, max_length=100)
+    note: str | None = Field(default=None, max_length=500)
+    started_at_ms: int = Field(gt=0)
+    ended_at_ms: int = Field(gt=0)
+    sample_count: int = Field(ge=0)
+    face_detected_samples: int = Field(ge=0)
+    dominant_visual_state: Literal["calm", "pleasant", "alert", "low", "unknown"]
+    average_scores: dict[str, float]
+
+
+@contextmanager
+def database_connection():
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def initialize_database() -> None:
+    """建立本機 SQLite；只保存工作階段摘要與使用者輸入，不保存影像。"""
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with database_connection() as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS emotion_sessions (
+                id TEXT PRIMARY KEY,
+                participant_code TEXT NOT NULL,
+                display_name TEXT,
+                note TEXT,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NOT NULL,
+                sample_count INTEGER NOT NULL,
+                face_detected_samples INTEGER NOT NULL,
+                dominant_visual_state TEXT NOT NULL,
+                average_scores_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_emotion_sessions_created_at
+            ON emotion_sessions(created_at_ms DESC)
+            """
+        )
+
+
+def _normalize_session_payload(payload: EmotionSessionCreate) -> dict[str, Any]:
+    participant_code = payload.participant_code.strip()
+    if not participant_code:
+        raise ValueError("使用者編號不可只包含空白")
+    if payload.ended_at_ms < payload.started_at_ms:
+        raise ValueError("結束時間不可早於開始時間")
+    if payload.face_detected_samples > payload.sample_count:
+        raise ValueError("偵測到人臉的樣本數不可大於總樣本數")
+
+    scores: dict[str, float] = {}
+    for emotion in MODEL_EMOTION_CLASSES:
+        value = float(payload.average_scores.get(emotion, 0.0))
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            raise ValueError(f"{emotion} 平均分數必須介於 0 到 1")
+        scores[emotion] = value
+
+    return {
+        "participant_code": participant_code,
+        "display_name": payload.display_name.strip() if payload.display_name else None,
+        "note": payload.note.strip() if payload.note else None,
+        "started_at_ms": payload.started_at_ms,
+        "ended_at_ms": payload.ended_at_ms,
+        "sample_count": payload.sample_count,
+        "face_detected_samples": payload.face_detected_samples,
+        "dominant_visual_state": payload.dominant_visual_state,
+        "average_scores": scores,
+    }
+
+
+def _row_to_session(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "participant_code": row["participant_code"],
+        "display_name": row["display_name"],
+        "note": row["note"],
+        "started_at_ms": row["started_at_ms"],
+        "ended_at_ms": row["ended_at_ms"],
+        "sample_count": row["sample_count"],
+        "face_detected_samples": row["face_detected_samples"],
+        "dominant_visual_state": row["dominant_visual_state"],
+        "average_scores": json.loads(row["average_scores_json"]),
+        "created_at_ms": row["created_at_ms"],
+    }
+
+
+def create_stored_session(payload: EmotionSessionCreate) -> dict[str, Any]:
+    normalized = _normalize_session_payload(payload)
+    session_id = str(uuid.uuid4())
+    created_at_ms = int(time.time() * 1000)
+    with database_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            INSERT INTO emotion_sessions (
+                id, participant_code, display_name, note,
+                started_at_ms, ended_at_ms, sample_count,
+                face_detected_samples, dominant_visual_state,
+                average_scores_json, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                normalized["participant_code"],
+                normalized["display_name"],
+                normalized["note"],
+                normalized["started_at_ms"],
+                normalized["ended_at_ms"],
+                normalized["sample_count"],
+                normalized["face_detected_samples"],
+                normalized["dominant_visual_state"],
+                json.dumps(
+                    normalized["average_scores"],
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ),
+                created_at_ms,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM emotion_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("資料庫寫入後無法讀回工作階段")
+    return _row_to_session(row)
+
+
+def list_stored_sessions(limit: int) -> list[dict[str, Any]]:
+    with database_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT * FROM emotion_sessions
+            ORDER BY created_at_ms DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [_row_to_session(row) for row in rows]
+
+
+def delete_stored_session(session_id: str) -> bool:
+    with database_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM emotion_sessions WHERE id = ?",
+            (session_id,),
+        )
+    return cursor.rowcount > 0
 
 
 def _allowed_origins() -> list[str]:
@@ -213,19 +411,33 @@ class EmotionService:
         if not CLASS_NAMES_PATH.is_file():
             raise FileNotFoundError(f"找不到類別：{CLASS_NAMES_PATH}")
 
+        import tensorflow as tf
+
+        # 必須在建立模型或執行任何 TensorFlow op 前設定。0 代表交由 TF 自動決定。
+        if TF_INTRA_OP_THREADS > 0:
+            tf.config.threading.set_intra_op_parallelism_threads(TF_INTRA_OP_THREADS)
+        if TF_INTER_OP_THREADS > 0:
+            tf.config.threading.set_inter_op_parallelism_threads(TF_INTER_OP_THREADS)
+
         self.engine = Stage3_FineTuned(
             str(MODEL_PATH),
             str(CLASS_NAMES_PATH),
             use_tta=DEFAULT_TTA,
         )
+        loaded_classes = tuple(str(name) for name in self.engine.class_names)
+        if loaded_classes != MODEL_EMOTION_CLASSES:
+            raise ValueError(
+                "class_names.npy 與八類模型順序不符："
+                f"expected={MODEL_EMOTION_CLASSES}, actual={loaded_classes}"
+            )
         self.lock = threading.Lock()
         self.started_at = time.time()
-
-        import tensorflow as tf
 
         gpus = tf.config.list_physical_devices("GPU")
         self.device = gpus[0].name if gpus else "CPU"
         self.tensorflow_version = tf.__version__
+        self.tf_intra_op_threads = tf.config.threading.get_intra_op_parallelism_threads()
+        self.tf_inter_op_threads = tf.config.threading.get_inter_op_parallelism_threads()
         warmup_started = time.perf_counter()
         self._warm_up()
         self.warmup_ms = (time.perf_counter() - warmup_started) * 1000
@@ -258,6 +470,7 @@ service: EmotionService | None = None
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global service
+    await asyncio.to_thread(initialize_database)
     service = await asyncio.to_thread(EmotionService)
     try:
         yield
@@ -277,7 +490,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -328,6 +541,10 @@ async def health() -> dict[str, Any]:
         "warmup_ms": round(current_service.warmup_ms, 1),
         "uptime_seconds": round(time.time() - current_service.started_at, 1),
         "accuracy_mode_default": DEFAULT_TTA,
+        "tf_intra_op_threads": current_service.tf_intra_op_threads,
+        "tf_inter_op_threads": current_service.tf_inter_op_threads,
+        "tta_batching": True,
+        "database_ready": DATABASE_PATH.is_file(),
     }
 
 
@@ -343,6 +560,30 @@ async def config() -> dict[str, Any]:
         "max_frame_dimension": MAX_FRAME_DIMENSION,
         "websocket_path": "/ws/emotion",
     }
+
+
+@app.post("/api/sessions", status_code=201)
+async def store_session(payload: EmotionSessionCreate) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(create_stored_session, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/sessions")
+async def stored_sessions(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    sessions = await asyncio.to_thread(list_stored_sessions, limit)
+    return {"items": sessions, "count": len(sessions)}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def remove_stored_session(session_id: str) -> dict[str, bool]:
+    deleted = await asyncio.to_thread(delete_stored_session, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="找不到工作階段")
+    return {"deleted": True}
 
 
 @app.post("/api/predict")

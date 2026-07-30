@@ -275,14 +275,22 @@ class Stage3_FineTuned:
                  use_tta=False):
         import tensorflow as tf
 
-        self.model = tf.keras.models.load_model(model_path)
+        # 純推論服務不需要還原 optimizer / loss 等訓練狀態，可降低啟動成本。
+        self.model = tf.keras.models.load_model(model_path, compile=False)
+        self.img_size = int(self.model.input_shape[1])
         self._infer = tf.function(
             lambda inputs: self.model(inputs, training=False),
-            reduce_retracing=True,
+            input_signature=[
+                tf.TensorSpec(
+                    shape=(None, self.img_size, self.img_size, 3),
+                    dtype=tf.float32,
+                )
+            ],
             autograph=False,
         )
-        self.class_names = list(np.load(class_names_path, allow_pickle=True))
-        self.img_size = 224
+        self.class_names = [
+            str(name) for name in np.load(class_names_path, allow_pickle=False)
+        ]
         self.name = "Stage 3: Fine-tuned Model"
         self.use_tta = use_tta
 
@@ -361,15 +369,17 @@ class Stage3_FineTuned:
             }
 
         face_input = self._preprocess_face(face_img)
-        # tf.function 編譯單張前向傳播，避免 model.predict 的資料管線固定成本。
-        preds = np.asarray(self._infer(face_input))[0]
         if self.use_tta:
             # Accuracy Mode：原圖與水平翻轉影像機率平均。
             # 臉部表情大致左右對稱，能降低單側光線與姿態造成的波動。
             flipped_face = cv2.flip(face_img, 1)
             flipped_input = self._preprocess_face(flipped_face)
-            flipped_preds = np.asarray(self._infer(flipped_input))[0]
-            preds = (preds + flipped_preds) / 2.0
+            # 合併成 batch=2，只做一次 TensorFlow 呼叫；輸出仍是兩張機率平均。
+            tta_batch = np.concatenate((face_input, flipped_input), axis=0)
+            preds = np.asarray(self._infer(tta_batch)).mean(axis=0)
+        else:
+            # tf.function 避免 model.predict 的資料管線固定成本。
+            preds = np.asarray(self._infer(face_input))[0]
         latency = (time.perf_counter() - t0) * 1000
 
         scores = {name: float(preds[i]) for i, name in enumerate(self.class_names)}

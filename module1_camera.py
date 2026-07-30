@@ -1,105 +1,118 @@
-import cv2
-import os
+"""LEGACY / OFFLINE camera diagnostic tool.
+
+This module is not used by the React + FastAPI application. It opens a local
+OpenCV window for camera and face-box testing only. It does not save frames or
+create a personal calibration baseline.
+
+Press C to start detection after a three-second countdown, S to stop detection,
+and Q to quit.
+"""
+
+from __future__ import annotations
+
 import time
 
-SAVE_DIR = "calibration"
-os.makedirs(SAVE_DIR, exist_ok=True)
+import cv2
 
-face_detector = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
 
-camera = cv2.VideoCapture(0)
-
-if not camera.isOpened():
-    print("Cannot open camera")
-    exit()
-
-status = "Ready"
-calibrating = False
-photo_count = 0
-countdown_start = 0
-last_capture = 0
-
-while True:
-    ret, frame = camera.read()
-    if not ret:
-        break
-
-    frame = cv2.flip(frame, 1)
-    clean = frame.copy()
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    faces = face_detector.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(120,120)
+def main() -> None:
+    face_detector = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
+    camera = cv2.VideoCapture(0)
 
-    face_img = None
+    if not camera.isOpened():
+        raise RuntimeError("Cannot open camera")
 
-    if len(faces) > 0:
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+    status = "Ready (offline diagnostic)"
+    countdown_started_at: float | None = None
+    detection_enabled = False
 
-        cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
-        cv2.putText(frame,"Face",(x,y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.8,(0,255,0),2)
+    print("LEGACY / OFFLINE TOOL: frames remain in memory and are not saved.")
 
-        face_img = clean[y:y+h, x:x+w]
+    try:
+        while True:
+            ok, frame = camera.read()
+            if not ok:
+                break
 
-    if calibrating:
-        t = time.time() - countdown_start
+            frame = cv2.flip(frame, 1)
 
-        if t < 1:
-            status = "3"
-        elif t < 2:
-            status = "2"
-        elif t < 3:
-            status = "1"
-        else:
-            status = "Capturing..."
+            if countdown_started_at is not None:
+                elapsed = time.time() - countdown_started_at
+                if elapsed < 3:
+                    status = f"Starting in {3 - int(elapsed)}"
+                else:
+                    countdown_started_at = None
+                    detection_enabled = True
+                    status = "Detecting"
 
-            if face_img is not None and time.time()-last_capture > 0.5:
-                photo_count += 1
+            if detection_enabled:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_detector.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(120, 120),
+                )
+                if len(faces) == 0:
+                    status = "Detecting - no face"
+                else:
+                    x, y, width, height = max(
+                        faces, key=lambda face: face[2] * face[3]
+                    )
+                    cv2.rectangle(
+                        frame,
+                        (x, y),
+                        (x + width, y + height),
+                        (0, 255, 0),
+                        2,
+                    )
+                    cv2.putText(
+                        frame,
+                        "Face",
+                        (x, max(20, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 255, 0),
+                        2,
+                    )
+                    status = "Detecting - face found"
 
-                face = cv2.resize(face_img, (224,224))
-                filename = os.path.join(SAVE_DIR, f"face{photo_count}.jpg")
-                cv2.imwrite(filename, face)
+            cv2.putText(
+                frame,
+                "C: Start detection  S: Stop  Q: Quit",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 255, 255),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"Status: {status}",
+                (20, 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+            )
+            cv2.imshow("LEGACY - Offline Camera Diagnostic", frame)
 
-                last_capture = time.time()
-                status = f"Capture {photo_count}/5"
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("c") and countdown_started_at is None:
+                countdown_started_at = time.time()
+                detection_enabled = False
+            elif key == ord("s"):
+                countdown_started_at = None
+                detection_enabled = False
+                status = "Stopped"
+            elif key == ord("q"):
+                break
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()
 
-                if photo_count >= 5:
-                    calibrating = False
-                    status = "Calibration Success"
 
-    cv2.putText(frame,"C : Calibration",(20,30),
-                cv2.FONT_HERSHEY_SIMPLEX,0.7,(255,255,255),2)
-
-    cv2.putText(frame,"Q : Quit",(20,60),
-                cv2.FONT_HERSHEY_SIMPLEX,0.7,(255,255,255),2)
-
-    cv2.putText(frame,"Status : " + status,(20,95),
-                cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
-
-    cv2.imshow("Module 1 - Input & Calibration", frame)
-
-    key = cv2.waitKey(1) & 0xFF
-
-    if key == ord("c") and not calibrating:
-        if face_img is not None:
-            calibrating = True
-            photo_count = 0
-            countdown_start = time.time()
-            last_capture = 0
-            status = "Calibration Start"
-        else:
-            status = "No Face"
-
-    if key == ord("q"):
-        break
-
-camera.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

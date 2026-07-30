@@ -1,151 +1,171 @@
 # Emotion Spectrum Engine
 
-以 TensorFlow、FER 與 MediaPipe 建立的即時人臉情緒辨識系統。專案包含四階段桌面展示、FastAPI/WebSocket 後端、React 串接範例，以及 GPU 訓練與評估工具。
+即時表情訊號視覺化系統，包含 TensorFlow／MediaPipe FastAPI 後端，以及
+React + TypeScript + Vite 前端。瀏覽器透過 WebSocket 傳送壓縮 JPEG，後端回傳
+八類模型信心度、四種視覺狀態、趨勢、人臉框與推論效能。
 
-## 系統輸出
+> 本專案分析的是影像中的可見表情訊號，不等同於人的真實情緒，也不能用於心理、
+> 醫療、人格、招募或高風險決策。
 
-模型辨識八種情緒：
+## 必要模型檔
 
-`anger`、`contempt`、`disgust`、`fear`、`happy`、`neutral`、`sad`、`surprise`
+啟動後端前，repo 根目錄必須包含：
 
-前端另將八類整理成四種視覺狀態：
+| 檔案 | 用途 | 版本管理 |
+| --- | --- | --- |
+| `emotion_model.keras` | 八類 TensorFlow 模型，約 44 MB | Git LFS |
+| `class_names.npy` | 模型輸出的固定類別順序 | Git |
+| `face_landmarker.task` | MediaPipe 人臉 landmarker | Git |
 
-| 視覺狀態 | 對應模型類別 |
-| --- | --- |
-| `calm` | `neutral` |
-| `pleasant` | `happy` |
-| `alert` | `anger`、`fear`、`surprise` |
-| `low` | `sad`、`contempt`、`disgust` |
+模型類別順序為：
 
-API 仍會回傳完整八類機率，前端可自行調整四種狀態的映射。
+```text
+anger, contempt, disgust, fear, happy, neutral, sad, surprise
+```
 
-## 快速開始
+前端仍維持四種主要情緒，八類模型結果各自映射一次：
 
-需求：Python 3.11、攝影機；GPU 模式另需 Docker Desktop、NVIDIA GPU 與 NVIDIA Container Toolkit。
+| 四種主要情緒 | API key | 八類模型來源 |
+| --- | --- | --- |
+| 平靜 | `calm` | `neutral` |
+| 愉悅 | `pleasant` | `happy` |
+| 緊張 | `alert` | `anger`、`fear`、`surprise` |
+| 低落 | `low` | `sad`、`contempt`、`disgust` |
 
-### Windows CPU
+情緒球與主要趨勢顯示這四種結果；Dashboard 的八類信心度仍保留原始模型細節。
+
+`*.keras` 已由 `.gitattributes` 設為 Git LFS。首次 clone 後請執行：
+
+```powershell
+git lfs install
+git lfs pull
+```
+
+若團隊不希望使用 Git LFS，可改成 GitHub Release 下載流程，但不可同時把大型模型
+直接提交為一般 Git blob。目前專案採 Git LFS。
+
+## 1. 啟動 FastAPI
+
+Windows PowerShell：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-api.txt
+.\.venv\Scripts\python.exe -m uvicorn api_server:app --host 127.0.0.1 --port 8000
 ```
 
-啟動桌面展示：
+驗證：
+
+- 健康檢查：<http://127.0.0.1:8000/api/health>
+- Swagger 文件：<http://127.0.0.1:8000/docs>
+- WebSocket：`ws://127.0.0.1:8000/ws/emotion`
+
+可複製根目錄的 `.env.example` 查看後端環境變數。Uvicorn 不會自動載入該檔；
+可由 shell、程序管理器或部署平台設定。
+
+## 2. 啟動 React
 
 ```powershell
-.\.venv\Scripts\python.exe main.py
+cd frontend
+Copy-Item .env.example .env
+npm install
+npm run dev
 ```
 
-啟動 React 可連接的 API：
+開啟 <http://127.0.0.1:5173>。前端 `.env` 預設連線：
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn api_server:app --host 0.0.0.0 --port 8000
+```dotenv
+VITE_API_HTTP_URL=http://localhost:8000
+VITE_API_WS_URL=ws://localhost:8000/ws/emotion
 ```
 
-### Docker GPU
+修改 `.env` 後需重新啟動 Vite。部署於 HTTPS 時，WebSocket URL 也必須使用 `wss://`。
 
-```powershell
-$env:EMOTION_API_PORT="8001"
-docker compose -f compose.gpu.yaml up --build -d
-```
+## 前端功能
 
-服務啟動後可使用：
+- Demo Mode：`calm`、`pleasant`、`alert`、`low` 每四秒輪播，不產生 Dashboard 假資料
+- Live Mode：經使用者同意後使用 `getUserMedia()`
+- 隱藏 Canvas：縮放至最長邊 640 px、JPEG quality 0.72、約 4 FPS
+- 背壓：上一張影格尚未回傳時不送下一張
+- 自動重連：WebSocket 斷線後以退避時間重試
+- 狀態：模型連線中／離線、無人臉、攝影機拒絕、分析暫停
+- Dashboard：八類信心度、時間趨勢、轉換、推論裝置與延遲
+- Dashboard 開啟期間由隱藏影格傳送器持續送出攝影機畫面，圖表與狀態即時更新
+- 工作階段控制：暫停／繼續、清除、CSV 匯出、停止攝影機
+- 安全模式、偏好減少動態支援與全螢幕
+- Live Mode：先顯示五秒觀看引導，但持續偵測直到使用者主動停止
+- SQLite：停止後經使用者勾選同意，保存代碼化使用者資訊與工作階段摘要
 
-- 健康檢查：`http://localhost:8001/api/health`
-- API 文件：`http://localhost:8001/docs`
-- WebSocket：`ws://localhost:8001/ws/emotion`
+### 推論效能
 
-停止服務：
+- 模型以 inference-only 模式載入，不還原訓練 optimizer。
+- 固定 `tf.function` 動態 batch signature，避免一般模式與 TTA 重複 tracing。
+- Accuracy Mode 將原圖與水平翻轉圖組成 batch，一次前向傳播後平均。
+- CPU threads 可用 `EMOTION_TF_INTRA_OP_THREADS` 與
+  `EMOTION_TF_INTER_OP_THREADS` 調整；目前預設值為本機實測的 `4 / 1`。
+- XLA 在目前 Windows CPU 實測較慢，因此沒有啟用。
 
-```powershell
-docker compose -f compose.gpu.yaml down
-```
+本機 CPU 基準（40 次暖機後推論）中，一般模式約 21 ms；Accuracy Mode 從原本
+兩次呼叫約 41.38 ms，降至單一 batch 約 28.73 ms，改善約 30.6%。實際延遲仍會受
+CPU、同時執行程式與臉部偵測時間影響。
 
-更完整的 API 格式與 React 串接方式請見 [docs/API.md](docs/API.md)。
+前端記憶體中的歷史上限為 1,200 筆，避免長時間執行無限制增長。
 
-## React 串接
+## 資料與隱私
 
-`frontend-example/` 提供可複製到 React/Vite 專案的 Hook 與相機元件：
+- 正式 React／FastAPI 路徑不會呼叫 `cv2.imwrite()`，也不建立人臉資料集。
+- WebSocket 影格只存在瀏覽器、網路傳輸與後端程序記憶體中。
+- SQLite 只保存使用者編號、選填名稱／備註、時間、樣本數、四類主狀態與八類平均分數。
+- Dashboard「清除紀錄」只清除目前瀏覽器工作階段與 WebSocket EMA／趨勢狀態；
+  已保存資料需在儲存完成畫面按「刪除此筆」或呼叫資料庫刪除 API。
+- `.env`、token、金鑰、使用者照片、錄影、匯出檔與虛擬環境均由 `.gitignore` 排除。
+- 若曾經把 ngrok token 分享或提交，必須在 ngrok 控制台撤銷；repo 內無法替隊友確認
+  外部帳號是否已完成撤銷。
 
-- `useEmotionStream.ts`：擷取影像、限制傳送頻率、處理 WebSocket 結果
-- `EmotionCamera.tsx`：相機畫面與情緒結果範例
-- `.env.example`：WebSocket 網址設定
+完整說明見 [隱私文件](docs/PRIVACY.md)。
 
-此目錄是整合範例，不是獨立 React 專案。將兩個 TypeScript 檔案複製到既有前端後，依 `.env.example` 設定網址即可。
+## 舊工具
 
-## 模型與評估
+`module1_camera.py` 已標示為 **LEGACY / OFFLINE**，只供本機 OpenCV 攝影機與人臉框
+診斷，不屬於正式資料流、不儲存影格，也不宣稱個人化校正。介面用語已改為
+「開始偵測」。
 
-目前正式展示使用 `emotion_model.keras`（EfficientNetV2B0 微調模型），最終系統再加入 EMA 滑動平均與情緒趨勢分析。EMA 改善連續影像穩定度，不會改變單張影像模型本身的 Accuracy。
-
-相同抽樣測試集的快速評估結果：
-
-| 模型 | Accuracy | Macro F1 | 用途 |
-| --- | ---: | ---: | --- |
-| 現有 FER 模型 | 34.38% | 詳見報告 | Baseline |
-| 自訓模型 | 38.75% | 詳見報告 | 改良模型 |
-| 自訓模型 + TTA | 40.00% | 39.65% | Accuracy Mode |
-| 最終系統 | 38.75% | 詳見報告 | 實際展示與穩定化 |
-
-這是 160 張平衡抽樣影像的工程快速測試，不應視為完整資料集的最終研究結論。歷史完整測試報告中的自訓模型 Accuracy 為 52.11%、Macro F1 為 49.93%，但早期訓練流程曾將 Test 當作驗證資料，因此本專案不以該數字宣稱相對提升。後續比較應以完全獨立且相同的測試集重跑所有模型。
-
-評估產物位於 `reports/`。重跑快速評估需先自行準備資料集：
-
-```text
-archive (3)/
-└─ archive (3)/
-   ├─ Train/
-   ├─ Test/
-   └─ labels.csv
-```
-
-```powershell
-.\.venv\Scripts\python.exe benchmark.py
-.\.venv\Scripts\python.exe benchmark.py --tta
-```
-
-## 重新訓練
-
-資料集與使用者照片不納入 Git，請依上方結構放置 FER 資料；自建照片可放在：
-
-```text
-custom_dataset/
-├─ anger/
-├─ contempt/
-├─ disgust/
-├─ fear/
-├─ happy/
-├─ neutral/
-├─ sad/
-└─ surprise/
-```
-
-GPU 訓練：
-
-```powershell
-docker compose -f compose.train.gpu.yaml build
-docker compose -f compose.train.gpu.yaml run --rm emotion-train
-```
-
-訓練會輸出 `emotion_model_candidate.keras`，不會直接覆蓋正式模型。
+`demo.py`、`main.py`、`benchmark.py` 與 `train_optimized.py` 為模型展示、評估與訓練
+工具。正式網頁不使用 Gradio、Streamlit、ngrok 或隨機假資料。
 
 ## 專案結構
 
 ```text
 .
-├─ api_server.py              # FastAPI 與 WebSocket 後端
-├─ emotion_system.py          # 四階段辨識引擎
-├─ demo.py / main.py          # 桌面攝影機展示
-├─ benchmark.py               # 同測試集模型評估
-├─ train_optimized.py         # 改良模型訓練
-├─ emotion_model.keras        # 正式情緒模型
-├─ class_names.npy            # 八類標籤
-├─ face_landmarker.task       # MediaPipe 人臉關鍵點模型
-├─ frontend-example/          # React 串接範例
-├─ docs/                      # API 與企劃文件
-└─ reports/                   # 評估結果與圖表
+├── api_server.py
+├── emotion_system.py
+├── emotion_model.keras
+├── class_names.npy
+├── face_landmarker.task
+├── frontend/
+│   └── src/
+│       ├── components/
+│       ├── hooks/
+│       ├── pages/
+│       ├── services/
+│       ├── types/
+│       ├── App.tsx
+│       └── main.tsx
+└── docs/
+    ├── API.md
+    └── PRIVACY.md
 ```
 
-## 隱私
+API 欄位與 WebSocket 訊息見 [API 文件](docs/API.md)。
 
-API 預設只在記憶體中處理影像，不儲存使用者原始畫面。正式部署時仍應使用 HTTPS/WSS、限制允許的前端來源，並取得使用者同意。
+## 已驗證命令
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile api_server.py emotion_system.py module1_camera.py
+cd frontend
+npm run lint
+npm run build
+```
+
+攝影機權限、真實人臉偵測和長時間記憶體測試需要在目標瀏覽器與實際硬體上完成。
