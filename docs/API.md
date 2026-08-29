@@ -66,6 +66,32 @@
 {"deleted": true}
 ```
 
+### `GET /api/analytics/distribution?range=today|week`
+
+回傳四類視覺狀態在指定區間內的分佈摘要。區間內每一段完整的視覺狀態持續時間，會在
+該狀態結束（切換或人臉遺失）時寫入 `visual_state_events` 資料表；本端點只讀取彙總。
+
+```json
+{
+  "range": "today",
+  "states": [
+    {"key": "calm", "count": 12, "avg_confidence": 0.71, "avg_duration_ms": 18400},
+    {"key": "pleasant", "count": 8, "avg_confidence": 0.66, "avg_duration_ms": 9200},
+    {"key": "alert", "count": 5, "avg_confidence": 0.58, "avg_duration_ms": 6100},
+    {"key": "low", "count": 3, "avg_confidence": 0.61, "avg_duration_ms": 7300}
+  ],
+  "top_transition": {"from": "calm", "to": "alert", "count": 4}
+}
+```
+
+`range=today` 以本機時區當日 00:00 為起點；`range=week` 為過去 7 天。
+
+### `GET /api/model-eval`
+
+回傳固定測試集的模型評估摘要（準確度、混淆矩陣、各類 P/R/F1、資料集候選比較、下一步
+建議），資料來源為 `data/model_eval.json`。`is_estimate: true` 代表尚未完成正式基準
+測試，數字為工程測試估計值；未來 `benchmark.py` 可覆寫此檔案以更新為實測結果。
+
 ## WebSocket
 
 連線成功後，伺服器先傳：

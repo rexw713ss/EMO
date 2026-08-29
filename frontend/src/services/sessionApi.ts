@@ -2,6 +2,7 @@ import { API_HTTP_URL } from './config'
 import type {
   EmotionSessionPayload,
   StoredEmotionSession,
+  StoredSessionsResponse,
 } from '../types/emotion'
 
 async function responseError(response: Response) {
@@ -24,6 +25,16 @@ export async function saveEmotionSession(
     throw new Error(await responseError(response))
   }
   return (await response.json()) as StoredEmotionSession
+}
+
+export async function listEmotionSessions(
+  limit = 20,
+): Promise<StoredSessionsResponse> {
+  const response = await fetch(`${API_HTTP_URL}/api/sessions?limit=${limit}`)
+  if (!response.ok) {
+    throw new Error(await responseError(response))
+  }
+  return (await response.json()) as StoredSessionsResponse
 }
 
 export async function deleteEmotionSession(sessionId: string): Promise<void> {

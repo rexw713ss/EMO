@@ -1,40 +1,85 @@
+import { useState } from 'react'
 import { ConfidenceBars } from '../components/ConfidenceBars'
 import { EmotionTrendChart } from '../components/EmotionTrendChart'
-import type { EmotionResponse, HistoryPoint } from '../types/emotion'
+import { DistributionSummaryCard } from '../components/dashboard/DistributionSummaryCard'
+import { HeroStateCard } from '../components/dashboard/HeroStateCard'
+import { SessionSwitcher } from '../components/dashboard/SessionSwitcher'
+import { TelemetryStrip } from '../components/dashboard/TelemetryStrip'
+import { TransitionAlertPanel } from '../components/dashboard/TransitionAlertPanel'
+import { ModelEvaluation } from './ModelEvaluation'
+import { deriveCurrentStateRun } from '../services/visualStateTimeline'
+import type { EmotionResponse, HistoryPoint, VisualStateKey } from '../types/emotion'
+
+const THRESHOLD_STORAGE_KEY = 'emotion-spectrum:threshold-seconds'
 
 interface DashboardProps {
   latest: EmotionResponse | null
   history: HistoryPoint[]
+  mode: 'demo' | 'live'
+  demoState: VisualStateKey
+  liveState: VisualStateKey
+  onSelectDemoState: (state: VisualStateKey) => void
   paused: boolean
   sessionActive: boolean
   sessionElapsedSeconds: number
+  sessionsVersion: number
+  attractMode: boolean
+  attractCountdownSeconds: number | null
   onTogglePaused: () => void
   onFinishSession: () => void
   onClear: () => void
   onExport: () => void
 }
 
+function loadThreshold(): number {
+  const raw = window.localStorage.getItem(THRESHOLD_STORAGE_KEY)
+  const parsed = raw ? Number(raw) : NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30
+}
+
 export function Dashboard({
   latest,
   history,
+  mode,
+  demoState,
+  liveState,
+  onSelectDemoState,
   paused,
   sessionActive,
   sessionElapsedSeconds,
+  sessionsVersion,
+  attractMode,
+  attractCountdownSeconds,
   onTogglePaused,
   onFinishSession,
   onClear,
   onExport,
 }: DashboardProps) {
-  const transitions = latest?.trend.recent_transitions ?? []
+  const [tab, setTab] = useState<'current' | 'eval'>('current')
+  const [thresholdSeconds, setThresholdSeconds] = useState(loadThreshold)
+
   const confidence = latest?.emotion.confidence ?? 0
   const sessionMinutes = Math.floor(sessionElapsedSeconds / 60)
   const sessionSeconds = String(sessionElapsedSeconds % 60).padStart(2, '0')
+
+  const heroState = mode === 'demo' ? demoState : liveState
+  const currentRun = deriveCurrentStateRun(history)
+  const heroSubtitle = latest?.face_detected
+    ? `${heroState} · ${latest.emotion.label}`
+    : mode === 'demo'
+      ? 'Demo Mode'
+      : '等待即時資料'
+
+  const changeThreshold = (seconds: number) => {
+    setThresholdSeconds(seconds)
+    window.localStorage.setItem(THRESHOLD_STORAGE_KEY, String(seconds))
+  }
 
   return (
     <main className="dashboard-page">
       <div className="dashboard-heading">
         <div>
-          <div className="eyebrow">LIVE TELEMETRY</div>
+          <div className="eyebrow">OPERATOR CONSOLE</div>
           <h1>情緒訊號儀表板</h1>
           <p>所有圖表均來自目前 FastAPI 工作階段，清除或重新整理後不保留。</p>
           {sessionActive && (
@@ -43,14 +88,22 @@ export function Dashboard({
               即時分析中 · {sessionMinutes}:{sessionSeconds} · WebSocket 真實資料
             </div>
           )}
+          {attractMode && (
+            <div className="dashboard-live-status attract-status" aria-live="polite">
+              <span />
+              閒置中 · 展示模式自動輪播
+            </div>
+          )}
+          {!attractMode && mode === 'live' && attractCountdownSeconds !== null && (
+            <div className="idle-countdown">
+              未偵測到人臉 · {attractCountdownSeconds}s 後進入展示模式
+            </div>
+          )}
         </div>
         <div className="dashboard-actions">
+          <SessionSwitcher sessionActive={sessionActive} refreshKey={sessionsVersion} />
           {sessionActive ? (
-            <button
-              className="button secondary"
-              type="button"
-              onClick={onFinishSession}
-            >
+            <button className="button secondary" type="button" onClick={onFinishSession}>
               完成並停止偵測
             </button>
           ) : (
@@ -72,84 +125,73 @@ export function Dashboard({
         </div>
       </div>
 
-      <section className="metric-grid">
-        <article className="metric-card primary-metric">
-          <span>目前情緒</span>
-          <strong>{latest?.face_detected ? latest.visual_state.label : '未知'}</strong>
-          <small>
-            {latest?.face_detected
-              ? `模型類別：${latest.emotion.label}`
-              : '等待即時資料'}
-          </small>
-        </article>
-        <article className="metric-card">
-          <span>信心度</span>
-          <strong>{Math.round(confidence * 100)}%</strong>
-          <small>EMA 平滑後結果</small>
-        </article>
-        <article className="metric-card">
-          <span>狀態持續</span>
-          <strong>{latest?.trend.duration_frames ?? 0}</strong>
-          <small>frames</small>
-        </article>
-        <article className="metric-card">
-          <span>推論延遲</span>
-          <strong>{latest ? latest.performance.inference_ms.toFixed(0) : '—'}</strong>
-          <small>ms · server {latest ? latest.performance.server_ms.toFixed(0) : '—'} ms</small>
-        </article>
-        <article className="metric-card">
-          <span>推論裝置</span>
-          <strong className="device-value">{latest?.performance.device ?? '—'}</strong>
-          <small>CPU / GPU 由 FastAPI 回報</small>
-        </article>
-      </section>
+      <div className="dashboard-tabs">
+        <button
+          type="button"
+          className={tab === 'current' ? 'active' : ''}
+          onClick={() => setTab('current')}
+        >
+          現況
+        </button>
+        <button
+          type="button"
+          className={tab === 'eval' ? 'active' : ''}
+          onClick={() => setTab('eval')}
+        >
+          模型評估
+        </button>
+      </div>
 
-      <section className="dashboard-grid">
-        <article className="panel trend-panel">
-          <div className="panel-title">
-            <div>
-              <span>TIME SERIES</span>
-              <h2>情緒時間趨勢</h2>
-            </div>
-            <small>最近 {Math.min(history.length, 100)} 筆</small>
-          </div>
-          <EmotionTrendChart history={history} />
-        </article>
+      {tab === 'eval' ? (
+        <ModelEvaluation />
+      ) : (
+        <>
+          <section className="operator-grid">
+            <HeroStateCard
+              state={heroState}
+              subtitle={heroSubtitle}
+              confidence={confidence}
+              elapsedMs={currentRun?.elapsedMs ?? 0}
+              frameCount={currentRun?.frameCount ?? 0}
+              mode={mode}
+              onSelectState={onSelectDemoState}
+            />
 
-        <article className="panel confidence-panel">
-          <div className="panel-title">
-            <div>
-              <span>MODEL OUTPUT</span>
-              <h2>八類信心度</h2>
-            </div>
-          </div>
-          <ConfidenceBars scores={latest?.emotion.smoothed_scores ?? {}} />
-        </article>
+            <article className="panel trend-panel">
+              <div className="panel-title">
+                <div>
+                  <span>STATE PULSE</span>
+                  <h2>狀態脈動</h2>
+                </div>
+                <small>最近 {Math.min(history.length, 200)} 筆</small>
+              </div>
+              <EmotionTrendChart history={history} />
+            </article>
 
-        <article className="panel transition-panel">
-          <div className="panel-title">
-            <div>
-              <span>RECENT EVENTS</span>
-              <h2>最近模型類別轉換</h2>
+            <div className="operator-row-2">
+              <article className="panel grouped-confidence-panel">
+                <div className="panel-title">
+                  <div>
+                    <span>MODEL OUTPUT</span>
+                    <h2>八類模型輸出 → 四類展示狀態</h2>
+                  </div>
+                </div>
+                <ConfidenceBars scores={latest?.emotion.smoothed_scores ?? {}} />
+              </article>
+
+              <DistributionSummaryCard />
+
+              <TransitionAlertPanel
+                history={history}
+                thresholdSeconds={thresholdSeconds}
+                onChangeThreshold={changeThreshold}
+              />
             </div>
-          </div>
-          {transitions.length === 0 ? (
-            <p className="empty-state">尚無情緒轉換紀錄。</p>
-          ) : (
-            <ol className="transition-list">
-              {[...transitions].reverse().map((transition) => (
-                <li key={`${transition.timestamp_ms}-${transition.from}-${transition.to}`}>
-                  <span>{new Date(transition.timestamp_ms).toLocaleTimeString()}</span>
-                  <strong>
-                    {transition.from} → {transition.to}
-                  </strong>
-                  <small>{transition.duration_frames} frames</small>
-                </li>
-              ))}
-            </ol>
-          )}
-        </article>
-      </section>
+          </section>
+
+          <TelemetryStrip latest={latest} history={history} />
+        </>
+      )}
     </main>
   )
 }

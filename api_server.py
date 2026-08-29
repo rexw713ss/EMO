@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,6 +43,9 @@ TF_INTRA_OP_THREADS = int(os.getenv("EMOTION_TF_INTRA_OP_THREADS", "4"))
 TF_INTER_OP_THREADS = int(os.getenv("EMOTION_TF_INTER_OP_THREADS", "1"))
 DATABASE_PATH = Path(
     os.getenv("EMOTION_DATABASE_PATH", BASE_DIR / "data" / "emotion_sessions.db")
+)
+MODEL_EVAL_PATH = Path(
+    os.getenv("EMOTION_MODEL_EVAL_PATH", BASE_DIR / "data" / "model_eval.json")
 )
 
 MODEL_EMOTION_CLASSES = (
@@ -134,6 +138,25 @@ def initialize_database() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_emotion_sessions_created_at
             ON emotion_sessions(created_at_ms DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS visual_state_events (
+                id TEXT PRIMARY KEY,
+                visual_state TEXT NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                avg_confidence REAL NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_visual_state_events_ended_at
+            ON visual_state_events(ended_at_ms DESC)
             """
         )
 
@@ -249,6 +272,95 @@ def delete_stored_session(session_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+def persist_visual_state_event(event: dict[str, Any]) -> None:
+    """背景寫入單一已完成的視覺狀態區間，供分佈摘要查詢使用。"""
+    if event["duration_ms"] <= 0:
+        return
+    with database_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO visual_state_events (
+                id, visual_state, started_at_ms, ended_at_ms,
+                duration_ms, avg_confidence, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                event["visual_state"],
+                event["started_at_ms"],
+                event["ended_at_ms"],
+                event["duration_ms"],
+                event["avg_confidence"],
+                int(time.time() * 1000),
+            ),
+        )
+
+
+def _start_of_range_ms(range_key: str) -> int:
+    if range_key == "week":
+        return int(time.time() * 1000) - 7 * 86_400_000
+    start_of_today = datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int(start_of_today.timestamp() * 1000)
+
+
+def compute_distribution(range_key: str) -> dict[str, Any]:
+    start_ms = _start_of_range_ms(range_key)
+    with database_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT visual_state, duration_ms, avg_confidence
+            FROM visual_state_events
+            WHERE ended_at_ms >= ?
+            ORDER BY ended_at_ms ASC
+            """,
+            (start_ms,),
+        ).fetchall()
+
+    totals: dict[str, dict[str, float]] = {
+        key: {"count": 0, "confidence_sum": 0.0, "duration_sum_ms": 0.0}
+        for key in VISUAL_STATE_GROUPS
+    }
+    transition_counts: dict[tuple[str, str], int] = {}
+    previous_state: str | None = None
+
+    for row in rows:
+        state = row["visual_state"]
+        if state in totals:
+            totals[state]["count"] += 1
+            totals[state]["confidence_sum"] += float(row["avg_confidence"])
+            totals[state]["duration_sum_ms"] += float(row["duration_ms"])
+            if previous_state is not None and previous_state in totals:
+                pair = (previous_state, state)
+                transition_counts[pair] = transition_counts.get(pair, 0) + 1
+            previous_state = state
+
+    states = [
+        {
+            "key": key,
+            "count": int(value["count"]),
+            "avg_confidence": (
+                value["confidence_sum"] / value["count"] if value["count"] else 0.0
+            ),
+            "avg_duration_ms": (
+                value["duration_sum_ms"] / value["count"] if value["count"] else 0.0
+            ),
+        }
+        for key, value in totals.items()
+    ]
+
+    top_transition = None
+    if transition_counts:
+        (from_key, to_key), count = max(
+            transition_counts.items(), key=lambda item: item[1]
+        )
+        top_transition = {"from": from_key, "to": to_key, "count": count}
+
+    return {"range": range_key, "states": states, "top_transition": top_transition}
+
+
 def _allowed_origins() -> list[str]:
     configured = os.getenv(
         "EMOTION_ALLOWED_ORIGINS",
@@ -300,6 +412,36 @@ class EmotionSession:
         self.current_emotion = "unknown"
         self.current_duration = 0
         self.transitions: deque[dict[str, Any]] = deque(maxlen=20)
+        self.current_visual_state = "unknown"
+        self.visual_state_started_ms: int | None = None
+        self.visual_state_confidence_sum = 0.0
+        self.visual_state_sample_count = 0
+        self.last_completed_visual_state_event: dict[str, Any] | None = None
+
+    def _track_visual_state(self, key: str, confidence: float, now_ms: int) -> None:
+        """追蹤四類視覺狀態的區間，供 /api/analytics/distribution 使用。"""
+        if key != self.current_visual_state:
+            if (
+                self.current_visual_state in VISUAL_STATE_GROUPS
+                and self.visual_state_started_ms is not None
+                and self.visual_state_sample_count > 0
+            ):
+                self.last_completed_visual_state_event = {
+                    "visual_state": self.current_visual_state,
+                    "started_at_ms": self.visual_state_started_ms,
+                    "ended_at_ms": now_ms,
+                    "duration_ms": now_ms - self.visual_state_started_ms,
+                    "avg_confidence": (
+                        self.visual_state_confidence_sum
+                        / self.visual_state_sample_count
+                    ),
+                }
+            self.current_visual_state = key
+            self.visual_state_started_ms = now_ms
+            self.visual_state_confidence_sum = 0.0
+            self.visual_state_sample_count = 0
+        self.visual_state_confidence_sum += confidence
+        self.visual_state_sample_count += 1
 
     def _update_ema(self, scores: dict[str, float]) -> None:
         if not self.initialized:
@@ -329,8 +471,11 @@ class EmotionSession:
         }
 
     def apply(self, raw: dict[str, Any]) -> dict[str, Any]:
+        self.last_completed_visual_state_event = None
+        now_ms = int(time.time() * 1000)
         raw_label = str(raw.get("emotion", "unknown"))
         if raw_label == "unknown" or not raw.get("all_scores"):
+            self._track_visual_state("unknown", 0.0, now_ms)
             return {
                 "face_detected": False,
                 "emotion": {
@@ -381,6 +526,11 @@ class EmotionSession:
         }
         stability = max(distribution.values()) if distribution else 0.0
 
+        visual_state_result = self._visual_state()
+        self._track_visual_state(
+            visual_state_result["key"], visual_state_result["confidence"], now_ms
+        )
+
         return {
             "face_detected": True,
             "emotion": {
@@ -391,7 +541,7 @@ class EmotionSession:
                 "scores": scores,
                 "smoothed_scores": dict(self.ema_scores),
             },
-            "visual_state": self._visual_state(),
+            "visual_state": visual_state_result,
             "trend": {
                 "dominant_emotion": max(distribution, key=distribution.get),
                 "duration_frames": self.current_duration,
@@ -586,6 +736,22 @@ async def remove_stored_session(session_id: str) -> dict[str, bool]:
     return {"deleted": True}
 
 
+@app.get("/api/analytics/distribution")
+async def analytics_distribution(
+    range: Literal["today", "week"] = Query(default="today"),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(compute_distribution, range)
+
+
+@app.get("/api/model-eval")
+async def model_eval() -> dict[str, Any]:
+    try:
+        raw = await asyncio.to_thread(MODEL_EVAL_PATH.read_text, "utf-8")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="尚未提供模型評估資料") from exc
+    return json.loads(raw)
+
+
 @app.post("/api/predict")
 async def predict_image(
     file: UploadFile = File(...),
@@ -669,9 +835,14 @@ async def emotion_websocket(websocket: WebSocket) -> None:
                 started = time.perf_counter()
                 raw = await asyncio.to_thread(current_service.predict, frame, accuracy_mode)
                 elapsed_ms = (time.perf_counter() - started) * 1000
-                await websocket.send_json(
-                    build_response(raw, session, frame, elapsed_ms, accuracy_mode)
-                )
+                response = build_response(raw, session, frame, elapsed_ms, accuracy_mode)
+                await websocket.send_json(response)
+                pending_event = session.last_completed_visual_state_event
+                if pending_event is not None:
+                    session.last_completed_visual_state_event = None
+                    asyncio.create_task(
+                        asyncio.to_thread(persist_visual_state_event, pending_event)
+                    )
             except ValueError as exc:
                 await websocket.send_json({"type": "error", "message": str(exc)})
             except Exception as exc:

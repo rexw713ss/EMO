@@ -1,3 +1,6 @@
+# Claude Code local session settings (machine-specific permission grants)
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -43,7 +46,8 @@ frontend/.env.*
 *.pfx
 
 # Private datasets, user images, recordings, and runtime data
-data/
+data/*
+!data/model_eval.json
 archive (3)/
 custom_dataset/
 validation_dataset/

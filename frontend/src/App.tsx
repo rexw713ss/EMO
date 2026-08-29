@@ -28,6 +28,8 @@ type AppPage = 'display' | 'dashboard'
 const DEMO_STATES: VisualStateKey[] = ['calm', 'pleasant', 'alert', 'low']
 const MAX_HISTORY_POINTS = 1200
 const LIVE_SESSION_DURATION_MS = 5000
+const ATTRACT_TRIGGER_SECONDS = 12
+const ATTRACT_CYCLE_MS = 4000
 
 interface SessionCaptureBuffer {
   active: boolean
@@ -65,6 +67,11 @@ function App() {
     null,
   )
   const [deleteBusy, setDeleteBusy] = useState(false)
+  const [sessionsVersion, setSessionsVersion] = useState(0)
+  const [attractMode, setAttractMode] = useState(false)
+  const [attractCountdownSeconds, setAttractCountdownSeconds] = useState<number | null>(null)
+  const [attractCycleState, setAttractCycleState] = useState<VisualStateKey>('calm')
+  const unknownSinceRef = useRef<number | null>(null)
   const lastTimestampRef = useRef(0)
   const sessionCaptureRef = useRef<SessionCaptureBuffer | null>(null)
   const camera = useCamera()
@@ -187,6 +194,45 @@ function App() {
     return socket.latest.visual_state.key
   }, [camera.stream, socket.latest, socket.status])
 
+  useEffect(() => {
+    if (mode !== 'live' || liveState !== 'unknown') {
+      unknownSinceRef.current = null
+      setAttractMode(false)
+      setAttractCountdownSeconds(null)
+      return
+    }
+    if (unknownSinceRef.current === null) {
+      unknownSinceRef.current = Date.now()
+    }
+    const tick = () => {
+      const since = unknownSinceRef.current
+      if (since === null) return
+      const elapsedSeconds = Math.floor((Date.now() - since) / 1000)
+      if (elapsedSeconds >= ATTRACT_TRIGGER_SECONDS) {
+        setAttractMode(true)
+        setAttractCountdownSeconds(0)
+      } else {
+        setAttractCountdownSeconds(ATTRACT_TRIGGER_SECONDS - elapsedSeconds)
+      }
+    }
+    tick()
+    const timer = window.setInterval(tick, 1000)
+    return () => window.clearInterval(timer)
+  }, [liveState, mode])
+
+  useEffect(() => {
+    if (!attractMode) return
+    const timer = window.setInterval(() => {
+      setAttractCycleState((current) => {
+        const index = DEMO_STATES.indexOf(current)
+        return DEMO_STATES[(index + 1) % DEMO_STATES.length]
+      })
+    }, ATTRACT_CYCLE_MS)
+    return () => window.clearInterval(timer)
+  }, [attractMode])
+
+  const effectiveLiveState = attractMode ? attractCycleState : liveState
+
   const changeMode = (nextMode: AppMode) => {
     if (nextMode === mode) return
     if (nextMode === 'demo') {
@@ -284,6 +330,7 @@ function App() {
       const stored = await saveEmotionSession(payload)
       setSavedSession(stored)
       setSessionPhase('saved')
+      setSessionsVersion((value) => value + 1)
     } catch (cause) {
       setSessionError(cause instanceof Error ? cause.message : '資料庫儲存失敗')
       setSessionPhase('form')
@@ -397,7 +444,7 @@ function App() {
         <LiveDisplay
           mode={mode}
           demoState={demoState}
-          liveState={liveState}
+          liveState={effectiveLiveState}
           result={socket.latest}
           safeMode={safeMode}
           paused={paused}
@@ -423,9 +470,16 @@ function App() {
           <Dashboard
             latest={socket.latest}
             history={history}
+            mode={mode}
+            demoState={demoState}
+            liveState={effectiveLiveState}
+            onSelectDemoState={setDemoState}
             paused={paused}
             sessionActive={sessionActive}
             sessionElapsedSeconds={detectionElapsedSeconds}
+            sessionsVersion={sessionsVersion}
+            attractMode={attractMode}
+            attractCountdownSeconds={attractCountdownSeconds}
             onTogglePaused={() => setPaused((value) => !value)}
             onFinishSession={finishSessionDetection}
             onClear={clearHistory}

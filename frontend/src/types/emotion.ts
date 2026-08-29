@@ -140,3 +140,77 @@ export interface StoredEmotionSession extends EmotionSessionPayload {
   id: string
   created_at_ms: number
 }
+
+export interface StoredSessionsResponse {
+  items: StoredEmotionSession[]
+  count: number
+}
+
+export interface VisualStateTransition {
+  from: VisualStateKey
+  to: VisualStateKey
+  startedAt: number
+  endedAt: number
+  durationMs: number
+  confidenceAtEnd: number
+}
+
+export type DistributionRange = 'today' | 'week'
+
+export interface DistributionStateSummary {
+  key: VisualStateKey
+  count: number
+  avg_confidence: number
+  avg_duration_ms: number
+}
+
+export interface DistributionTransitionSummary {
+  from: VisualStateKey
+  to: VisualStateKey
+  count: number
+}
+
+export interface DistributionSummary {
+  range: DistributionRange
+  states: DistributionStateSummary[]
+  top_transition: DistributionTransitionSummary | null
+}
+
+export interface PerClassMetric {
+  label: EmotionLabel
+  precision: number
+  recall: number
+  f1: number
+  support: number
+}
+
+export interface SubgroupMetric {
+  condition: string
+  accuracy: number
+  sample_count: number
+}
+
+export interface DatasetCandidate {
+  name: string
+  class_count: number
+  has_contempt: boolean
+  notes: string
+  status: 'candidate' | 'needs_license' | 'in_use'
+}
+
+export interface ModelEvaluationData {
+  updated_at: string
+  accuracy_pct: number
+  tta_accuracy_pct: number
+  sample_count: number
+  target_sample_count: number
+  confidence_interval_pct: number
+  class_names: EmotionLabel[]
+  confusion_matrix: number[][]
+  per_class_metrics: PerClassMetric[]
+  subgroup_metrics: SubgroupMetric[]
+  dataset_candidates: DatasetCandidate[]
+  next_steps: string[]
+  is_estimate: boolean
+  estimate_note: string
+}
