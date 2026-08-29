@@ -1,0 +1,91 @@
+# Claude Code local session settings (machine-specific permission grants)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Python virtual environments (root and nested)
+/.venv/
+/venv/
+/env/
+**/.venv/
+**/venv/
+**/env/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.vite/
+frontend/*.tsbuildinfo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Private datasets, user images, recordings, and runtime data
+data/*
+!data/model_eval.json
+archive (3)/
+custom_dataset/
+validation_dataset/
+datasets/
+captures/
+calibration/
+recordings/
+uploads/
+user-data/
+*.webm
+*.mp4
+
+# Generated training and benchmark artifacts
+reports/
+checkpoints/
+emotion_model_candidate.keras
+class_names_candidate.npy
+candidate_training_history.png
+candidate_confusion_matrix.png
+
+# Local exports, temporary files, and logs
+exports/
+*.log
+*.tmp
+*.bak
+
+# Local databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS and editors
+.DS_Store
+Desktop.ini
+Thumbs.db
+.idea/
+.vscode/
+.vs/

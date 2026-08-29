@@ -1,0 +1,72 @@
+{
+  "updated_at": "2026-08-29",
+  "accuracy_pct": 38.75,
+  "tta_accuracy_pct": 40.0,
+  "sample_count": 160,
+  "target_sample_count": 4000,
+  "confidence_interval_pct": 3.9,
+  "class_names": ["anger", "contempt", "disgust", "fear", "happy", "neutral", "sad", "surprise"],
+  "confusion_matrix": [
+    [9, 3, 4, 2, 0, 1, 0, 1],
+    [4, 3, 6, 1, 1, 3, 2, 0],
+    [4, 5, 5, 2, 0, 1, 2, 1],
+    [2, 0, 1, 6, 1, 2, 2, 6],
+    [0, 1, 0, 0, 16, 2, 0, 1],
+    [0, 1, 1, 1, 2, 12, 3, 0],
+    [1, 2, 3, 2, 1, 5, 6, 0],
+    [2, 1, 1, 7, 2, 2, 0, 5]
+  ],
+  "per_class_metrics": [
+    { "label": "anger", "precision": 0.409, "recall": 0.45, "f1": 0.429, "support": 20 },
+    { "label": "contempt", "precision": 0.188, "recall": 0.15, "f1": 0.167, "support": 20 },
+    { "label": "disgust", "precision": 0.238, "recall": 0.25, "f1": 0.244, "support": 20 },
+    { "label": "fear", "precision": 0.286, "recall": 0.3, "f1": 0.293, "support": 20 },
+    { "label": "happy", "precision": 0.696, "recall": 0.8, "f1": 0.744, "support": 20 },
+    { "label": "neutral", "precision": 0.429, "recall": 0.6, "f1": 0.5, "support": 20 },
+    { "label": "sad", "precision": 0.4, "recall": 0.3, "f1": 0.343, "support": 20 },
+    { "label": "surprise", "precision": 0.357, "recall": 0.25, "f1": 0.294, "support": 20 }
+  ],
+  "subgroup_metrics": [
+    { "condition": "側臉 > 30°", "accuracy": 24.0, "sample_count": 25 },
+    { "condition": "背光", "accuracy": 21.7, "sample_count": 23 },
+    { "condition": "遮擋（口罩／瀏海）", "accuracy": 19.4, "sample_count": 31 }
+  ],
+  "dataset_candidates": [
+    {
+      "name": "現場自採（目前測試集）",
+      "class_count": 8,
+      "has_contempt": true,
+      "notes": "與部署環境最接近，但樣本數偏小、需要人工標註擴充",
+      "status": "in_use"
+    },
+    {
+      "name": "AffectNet",
+      "class_count": 8,
+      "has_contempt": true,
+      "notes": "類別對應最完整，需申請研究用途授權",
+      "status": "needs_license"
+    },
+    {
+      "name": "RAF-DB",
+      "class_count": 7,
+      "has_contempt": false,
+      "notes": "無 contempt 類別，需額外處理映射",
+      "status": "candidate"
+    },
+    {
+      "name": "FER-2013",
+      "class_count": 7,
+      "has_contempt": false,
+      "notes": "48px 灰階，與現場鏡頭畫質落差大",
+      "status": "candidate"
+    }
+  ],
+  "next_steps": [
+    "固定測試集擴充至 4,000 張平衡抽樣，縮小信賴區間",
+    "申請 AffectNet 資料集授權，取得完整 8 類對應",
+    "針對混淆矩陣中互相誤判的類別（如 contempt/disgust、fear/surprise）加強標註",
+    "展示端優先只驗證四類視覺狀態準確度，門檻較低、最快可對外呈現"
+  ],
+  "is_estimate": true,
+  "estimate_note": "此頁數字為企劃書初稿的工程測試估計值（160 張平衡抽樣），尚未完成正式基準測試；benchmark.py 產出正式結果後可覆寫本檔案。"
+}
